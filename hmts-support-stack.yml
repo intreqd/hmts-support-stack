@@ -2,16 +2,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: This is an AWS Cloudformation template that will create the source and targets and accompanying roles to quickly utilize the Healthshare Transformation Service.
 Parameters:
-  HL7SourceBucketName:
-    Description: The source bucket to pull HL7 Messages for Transformation
+  PipelineName:
+    Description: The name of the pipeline, that will be used to create the resources.
     Type: String
   HL7SourceBucketKey:
     Description: The key (folder) in the source bucket to pull from. (Enforced)
     Type: String
     Default: in
-  FHIRTargetBucketName:
-    Description: The target bucket to push the FHIR Resources and Bundles to
-    Type: String
   FHIRTargetBucketKey:
     Description: The key (folder) in the source bucket to pull from. (enforced)
     Type: String
@@ -40,33 +37,44 @@ Parameters:
   HealthLakeFHIRDataStoreID:
     Description: Your AWS Healthlake DataStore ID
     Type: String
-Mappings:
-  AMI2RegionMap:
-    eu-west-1:
-      '64': ami-1c4a046f
-    eu-central-1:
-      '64': ami-b03ffedf
+  HMTSTransformType:
+    Description: Deploy a highly available IRIS deployment conditional
+    Default: "s3tos3"
+    Type: String
+    AllowedValues:
+      - "s3tos3"
+      - "s3tohl"
+Conditions:
+  ShouldCreateS3toS3: !Equals
+  - "s3tos3"
+  - !Ref HMTSTransformType
+  ShouldCreateS3toHL: !Equals
+  - "s3tohl"
+  - !Ref HMTSTransformType
 Resources:
   HL7SourceBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: !Sub ${HL7SourceBucketName}-hmts-source
-        PublicAccessBlockConfiguration:
-          BlockPublicAcls: true
-          BlockPublicPolicy: true
-          IgnorePublicAcls: true
-          RestrictPublicBuckets: true
+    Type: AWS::S3::Bucket
+    Condition: ShouldCreateS3toS3
+    Properties:
+      BucketName: !Sub ${PipelineName}-hmts-source
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
   FHIRTargetBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: !Sub ${FHIRTargetBucketName}-hmts-target
-        PublicAccessBlockConfiguration:
-          BlockPublicAcls: true
-          BlockPublicPolicy: true
-          IgnorePublicAcls: true
-          RestrictPublicBuckets: true
+    Type: AWS::S3::Bucket
+    Condition: ShouldCreateS3toS3
+    Properties:
+      BucketName: !Sub ${PipelineName}-hmts-target
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
   IAMRoleS3toS3:
     Type: AWS::IAM::Role
+    Condition: ShouldCreateS3toS3
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -91,12 +99,13 @@ Resources:
                   - s3:DeleteObject
                   - s3:GetBucketLocation
                 Resource: 
-                  - !Sub "arn:aws:s3:::${HL7SourceBucketName}"
-                  - !Sub "arn:aws:s3:::${HL7SourceBucketName}/*"
-                  - !Sub "arn:aws:s3:::${FHIRTargetBucketName}"
-                  - !Sub "arn:aws:s3:::${FHIRTargetBucketName}/*"
+                  - !Sub "arn:aws:s3:::${PipelineName}-hmts-source"
+                  - !Sub "arn:aws:s3:::${PipelineName}-hmts-source/*"
+                  - !Sub "arn:aws:s3:::${PipelineName}-hmts-target"
+                  - !Sub "arn:aws:s3:::${PipelineName}-hmts-target/*"
   IAMRoleS3toHealthLake:
     Type: AWS::IAM::Role
+    Condition: ShouldCreateS3toHL
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -129,19 +138,76 @@ Resources:
                   - healthlake:UpdateResource
                   - healthlake:GetCapabilities
                 Resource: 
-                  - !Sub "arn:aws:s3:::${HL7SourceBucketName}"
-                  - !Sub "arn:aws:s3:::${HL7SourceBucketName}/*"
-                  - !Sub "arn:aws:s3:::${FHIRTargetBucketName}"
-                  - !Sub "arn:aws:s3:::${FHIRTargetBucketName}/*"
-                  - !Sub "arn:aws:healthlake:${AWS::Region}:${AWS::AccountId}:datastore/fhir/${HealthLakeFHIRDataStoreID}"
+                  - !Sub "arn:aws:s3:::${PipelineName}-hmts-source"
+                  - !Sub "arn:aws:s3:::${PipelineName}-hmts-source/*"
+                  - !Sub "arn:aws:s3:::${PipelineName}-hmts-target"
+                  - !Sub "arn:aws:s3:::${PipelineName}-hmts-target/*"
+                  - !Sub "arn:aws:healthlake:${HealthLakeRegion}:${AWS::AccountId}:datastore/fhir/${HealthLakeFHIRDataStoreID}"
+  BucketKeysFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !If [ShouldCreateS3toS3, !Ref IAMRoleS3toS3, !Ref IAMRoleS3toHealthLake]
+      Runtime: python3.6
+      FunctionName: !Sub ${PipelineName}-hmts-keys
+      Description: Simply creates keys in buckets.
+      Timeout: "300"
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              pipeline_name = event['ResourceProperties']['PipelineName']
+              hl7_src_key = event['ResourceProperties']['HL7SourceBucketKey']
+              fhir_target_key = event['ResourceProperties']['FHIRTargetBucketKey']
+              fhir_src_logging_key = event['ResourceProperties']['FHIRSourceBucketLoggingKey']
+
+              if event['RequestType'] == "Create":
+                # Redeploy the Api After Changes from stack
+                try:
+                  s3 = boto3.client('s3')
+                  src_bucket = pipline_name + '-hmts-source'
+                  target_bucket = pipeline_name + '-hmts-target'
+                  # create keys here
+                  s3.put_object(Bucket=src_bucket, Key=hl7_src_key)
+                  s3.put_object(Bucket=src_bucket, Key=fhir_src_logging_key)
+                  s3.put_object(Bucket=target_bucket, Key=fhir_target_key)
+                except:
+                  print("Failed")
+                send_cfnresponse(event, context, "SUCCESS",
+                             {'message': 'donesies'})
+              if event['RequestType'] == "Delete":
+                #
+                send_cfnresponse(event, context, "SUCCESS",
+                             {'message': 'delete no op'})
+              if event['RequestType'] == "Update":
+                #
+                send_cfnresponse(event, context, "SUCCESS",
+                             {'message': 'update no op'})
+          def send_cfnresponse(event, context, status, data):
+              if status == "SUCCESS":
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, data)
+              else:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, data)
+  BucketKeysResource:
+    Type: "Custom::BucketKeysResource"
+    Properties:
+      ServiceToken: !GetAtt BucketKeysFunction.Arn
+      PipelineName: !Ref PipelineName
+      HL7SourceBucketKey: !Ref HL7SourceBucketKey
+      FHIRTargetBucketKey: !Ref FHIRTargetBucketKey
+      FHIRSourceBucketLoggingKey: !Ref FHIRSourceBucketLoggingKey
 Outputs:
   HMTSS3toS3RoleArn:
+    Condition: ShouldCreateS3toS3
     Description: IAM Role for S3 to S3
     Value:
       Fn::GetAtt:
       - IAMRoleS3toS3
       - Arn
   HMTSFHIRtoS3RoleArn:
+    Condition: ShouldCreateS3toHL
     Description: IAM Role for S3 to Healthlake
     Value:
       Fn::GetAtt:
