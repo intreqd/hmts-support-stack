@@ -143,11 +143,29 @@ Resources:
                   - !Sub "arn:aws:s3:::${PipelineName}-hmts-target"
                   - !Sub "arn:aws:s3:::${PipelineName}-hmts-target/*"
                   - !Sub "arn:aws:healthlake:${HealthLakeRegion}:${AWS::AccountId}:datastore/fhir/${HealthLakeFHIRDataStoreID}"
+  BucketKeysRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${PipelineName}-lambda-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+            - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Path: /
   BucketKeysFunction:
     Type: AWS::Lambda::Function
+    Condition: ShouldCreateS3toS3
     Properties:
       Handler: "index.lambda_handler"
-      Role: !If [ShouldCreateS3toS3, !Ref IAMRoleS3toS3, !Ref IAMRoleS3toHealthLake]
+      Role: !GetAtt BucketKeysRole.Arn #!If [ShouldCreateS3toS3, !Ref IAMRoleS3toS3, !Ref IAMRoleS3toHealthLake]
       Runtime: python3.6
       FunctionName: !Sub ${PipelineName}-hmts-keys
       Description: Simply creates keys in buckets.
@@ -167,14 +185,14 @@ Resources:
                 # Redeploy the Api After Changes from stack
                 try:
                   s3 = boto3.client('s3')
-                  src_bucket = pipline_name + '-hmts-source'
+                  src_bucket = pipeline_name + '-hmts-source'
                   target_bucket = pipeline_name + '-hmts-target'
                   # create keys here
                   s3.put_object(Bucket=src_bucket, Key=hl7_src_key)
                   s3.put_object(Bucket=src_bucket, Key=fhir_src_logging_key)
                   s3.put_object(Bucket=target_bucket, Key=fhir_target_key)
-                except:
-                  print("Failed")
+                except Exception as e:
+                  print(e)
                 send_cfnresponse(event, context, "SUCCESS",
                              {'message': 'donesies'})
               if event['RequestType'] == "Delete":
@@ -213,3 +231,12 @@ Outputs:
       Fn::GetAtt:
       - IAMRoleS3toHealthLake
       - Arn
+  Source:
+    Description: Upload HL7 Here
+    Value: !Sub ${PipelineName}-hmts-src/${HL7SourceBucketKey}
+  Target:
+    Description: FHIR Here
+    Value: !Sub ${PipelineName}-hmts-target/${FHIRTargetBucketKey}
+  Logging:
+    Description: Logs Here
+    Value: !Sub ${PipelineName}-hmts-src/${FHIRSourceBucketLoggingKey}
