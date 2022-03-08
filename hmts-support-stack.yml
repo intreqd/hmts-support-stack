@@ -17,26 +17,6 @@ Parameters:
     Description: The key (folder) in the source bucket to log to. (enforced)
     Type: String
     Default: logs
-  BucketRegion:
-    Description: Where the buckets reside. Note, this must be the same region as your hmts pipeline.
-    Type: String
-    Default: us-east-2
-    AllowedValues:
-    - us-east-1
-    - us-east-2
-    - eu-central-1
-    - eu-west-2
-    - eu-west-3
-  HealthLakeRegion:
-    Description: Your AWS Healthlake Region
-    Type: String
-    Default: us-east-2
-    AllowedValues:
-    - us-east-1
-    - us-east-2
-  HealthLakeFHIRDataStoreID:
-    Description: Your AWS Healthlake DataStore ID
-    Type: String
   HMTSTransformType:
     Description: Deploy a highly available IRIS deployment conditional
     Default: "s3tos3"
@@ -72,6 +52,12 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+  HealthLake:
+    Type: AWS::HealthLake::FHIRDatastore
+    Condition: ShouldCreateS3toHL
+    Properties: 
+      DatastoreName: !Sub ${PipelineName}
+      DatastoreTypeVersion: R4
   IAMRoleS3toS3:
     Type: AWS::IAM::Role
     Condition: ShouldCreateS3toS3
@@ -105,6 +91,7 @@ Resources:
                   - !Sub "arn:aws:s3:::${PipelineName}-hmts-target/*"
   IAMRoleS3toHealthLake:
     Type: AWS::IAM::Role
+    DependsOn: HealthLake
     Condition: ShouldCreateS3toHL
     Properties:
       AssumeRolePolicyDocument:
@@ -142,7 +129,7 @@ Resources:
                   - !Sub "arn:aws:s3:::${PipelineName}-hmts-source/*"
                   - !Sub "arn:aws:s3:::${PipelineName}-hmts-target"
                   - !Sub "arn:aws:s3:::${PipelineName}-hmts-target/*"
-                  - !Sub "arn:aws:healthlake:${HealthLakeRegion}:${AWS::AccountId}:datastore/fhir/${HealthLakeFHIRDataStoreID}"
+                  - !Sub "arn:aws:healthlake:${AWS::Region}:${AWS::AccountId}:datastore/fhir/$(Fn::GetAtt:[HealthLake, DatastoreId])"
   BucketKeysRole:
     Type: AWS::IAM::Role
     Properties:
